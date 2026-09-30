@@ -106,12 +106,16 @@ export const replacePlaybackSongInQueue = (
 ): SongResult[] => {
     const replacementKey = getPlaybackSongKey(replacement);
     let replaced = false;
-    const nextQueue = queue.map(song => {
-        if (getPlaybackSongKey(song) !== replacementKey) return song;
+    let nextQueue: SongResult[] | undefined;
+    // 只有歌曲资料实际变化时才复制队列，保留磁贴和持久化使用的稳定数组引用。
+    for (let index = 0; index < queue.length; index += 1) {
+        if (getPlaybackSongKey(queue[index]) !== replacementKey) continue;
         replaced = true;
-        return replacement;
-    });
-    return replaced ? nextQueue : [replacement, ...nextQueue];
+        if (queue[index] === replacement) continue;
+        nextQueue ??= queue.slice();
+        nextQueue[index] = replacement;
+    }
+    return replaced ? nextQueue ?? queue : [replacement, ...queue];
 };
 
 export const hasMixedPlaybackSources = (queue: SongResult[]): boolean => (

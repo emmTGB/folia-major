@@ -4,7 +4,9 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { usePlaybackQueueController } from '@/hooks/usePlaybackQueueController';
 import { usePlaybackStore } from '@/stores/usePlaybackStore';
-import type { SongResult } from '@/types';
+import type { LocalSong, SongResult, UnifiedSong } from '@/types';
+import { buildLatticeTiles } from '@/components/app/lattice/latticeModel';
+import { getPlaybackSongKey } from '@/utils/appPlaybackGuards';
 import { retireBlobUrl } from '@/services/playbackBlobUrls';
 import { registerCoverObjectUrl } from '@/services/coverObjectUrls';
 
@@ -56,6 +58,7 @@ describe('online playback request resources', () => {
     const revoke = vi.fn();
     let audioSequence: number;
     let coverSequence: number;
+    const Probe = () => { controller = usePlaybackQueueController(params); return null; };
 
     beforeEach(async () => {
         Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -91,7 +94,6 @@ describe('online playback request resources', () => {
             playbackAutoSkipCountRef: { current: 0 }, pendingResumeTimeRef: { current: null },
             currentOnlineAudioUrlFetchedAtRef: { current: null }, lastAudioRecoverySourceRef: { current: null },
         };
-        const Probe = () => { controller = usePlaybackQueueController(params); return null; };
         root = createRoot(document.createElement('div'));
         await act(async () => { root.render(React.createElement(Probe)); });
     });
@@ -99,6 +101,84 @@ describe('online playback request resources', () => {
         await act(async () => { root.unmount(); });
         vi.restoreAllMocks();
         vi.unstubAllGlobals();
+    });
+
+    it('resolves a 10,000-song local queue through a reusable library index', async () => {
+        let idReads = 0;
+        const records: LocalSong[] = Array.from({ length: 10_000 }, (_, index) => ({
+            get id() { idReads += 1; return `local-${index}`; },
+            title: `Track ${index}`, titleOrigin: 'import',
+            importedMetadata: { title: `Track ${index}`, titleSource: 'filename', artistNames: [] },
+            fileName: `${index}.mp3`, filePath: `${index}.mp3`, duration: 1000,
+            fileSize: 1, mimeType: 'audio/mpeg', addedAt: 0,
+        }));
+        const queue = records.map((_, index) => ({
+            ...song(`local-${index}`), isLocal: true, localRef: { songId: `local-${index}` },
+            sourceRef: { kind: 'local' as const, mediaId: `local-${index}` },
+        })).reverse();
+        params.localSongs = records;
+        await act(async () => { root.render(React.createElement(Probe)); });
+        expect(idReads).toBeLessThanOrEqual(records.length * 3);
+        idReads = 0;
+        await act(async () => { await controller.playSong(queue[9000], queue); });
+        expect(idReads).toBeLessThanOrEqual(records.length * 3);
+        expect(params.onPlayLocalSong).toHaveBeenCalledWith(records[999], [...records].reverse(),
+            expect.objectContaining({ unifiedQueue: queue }));
+        const firstReads = idReads;
+        await act(async () => { await controller.playSong(queue[123], queue); });
+        expect(idReads - firstReads).toBeLessThan(10);
+
+        const updated = { ...records[999], title: 'Updated metadata' };
+        params.localSongs = records.map((record, index) => index === 999 ? updated : record);
+        await act(async () => { root.render(React.createElement(Probe)); });
+        await act(async () => { await controller.playSong(queue[9000], queue); });
+        expect(vi.mocked(params.onPlayLocalSong).mock.calls.at(-1)?.[0]).toBe(updated);
+    }, 15_000);
+
+    it('keeps a 10,000-song queue and tile identities on jumps, then mirrors its shuffled order', async () => {
+        const queue = Array.from({ length: 10_000 }, (_, index) => song(String(index)));
+        Object.freeze(queue);
+        await act(async () => { await controller.playSong(queue[9876], queue); });
+        expect(usePlaybackStore.getState().playQueue).toBe(queue);
+        let tiles = buildLatticeTiles({ queue, currentSong: usePlaybackStore.getState().currentSong });
+        expect(tiles).toHaveLength(queue.length);
+        expect(tiles[9876]).toMatchObject({ id: 'online:netease:9876', queueIndex: 9876, section: 'now' });
+        expect(tiles[9875].section).toBe('played');
+        expect(tiles[9877].section).toBe('upcoming');
+        vi.spyOn(Math, 'random').mockReturnValue(0.5);
+        await act(async () => { controller.shuffleQueue(); });
+        const shuffled = usePlaybackStore.getState().playQueue;
+        expect(shuffled).not.toBe(queue);
+        expect(shuffled[0]).toBe(queue[9876]);
+        expect(new Set(shuffled.map(getPlaybackSongKey)).size).toBe(10_000);
+        await act(async () => { await controller.playSong(shuffled[9999], shuffled); });
+        expect(usePlaybackStore.getState().playQueue).toBe(shuffled);
+        tiles = buildLatticeTiles({ queue: shuffled, currentSong: usePlaybackStore.getState().currentSong });
+        expect(tiles.map(tile => tile.id)).toEqual(shuffled.map(getPlaybackSongKey));
+        expect(tiles[9999].section).toBe('now');
+        expect(queue[0].id).toBe('0');
+    });
+
+    it('retains mixed tile entries but resolves only available local records in their queue order', async () => {
+        const first: LocalSong = {
+            id: 'local-a', title: 'First', titleOrigin: 'import',
+            importedMetadata: { title: 'First', titleSource: 'filename', artistNames: [] },
+            fileName: 'a.mp3', filePath: 'a.mp3', duration: 1000, fileSize: 1, mimeType: 'audio/mpeg', addedAt: 0,
+        };
+        const second = { ...first, id: 'local-b', title: 'Second' };
+        params.localSongs = [first, { ...first, title: 'Duplicate ID' }, second];
+        await act(async () => { root.render(React.createElement(Probe)); });
+        const local = (id: string): UnifiedSong => ({
+            ...song(id), isLocal: true, localRef: { songId: id }, sourceRef: { kind: 'local', mediaId: id },
+        });
+        const queue = [local('local-b'), song('online'), local('missing'), local('local-a')];
+        await act(async () => { await controller.playSong(queue[3], queue); });
+        expect(params.onPlayLocalSong).toHaveBeenCalledWith(first, [second, first],
+            expect.objectContaining({ unifiedQueue: queue }));
+        vi.mocked(params.onPlayLocalSong).mockClear();
+        await act(async () => { await controller.playSong(queue[2], queue); });
+        expect(params.onPlayLocalSong).not.toHaveBeenCalled();
+        expect(buildLatticeTiles({ queue, currentSong: queue[3] }).map(tile => tile.id)).toEqual(queue.map(getPlaybackSongKey));
     });
 
     it('releases unclaimed audio and cover when an older cover request finishes after a new song', async () => {

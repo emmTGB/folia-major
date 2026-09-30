@@ -46,6 +46,24 @@ const navidromeSong = (songId: string, id = -1, name = 'Navidrome'): SongResult 
 } as SongResult);
 
 describe('playback song identity', () => {
+    it('reuses an unchanged queue without mutating its entries', () => {
+        const queue = [neteaseSong(1), localSong('local-1'), navidromeSong('navi-1')];
+        Object.freeze(queue);
+        expect(replacePlaybackSongInQueue(queue, queue[1])).toBe(queue);
+    });
+
+    it('updates every matching entry on a copy and prepends an absent song', () => {
+        const original = localSong('local-1');
+        const queue = [original, neteaseSong(1), original];
+        Object.freeze(queue);
+        const replacement = localSong('local-1', -2, 'Updated');
+        const updated = replacePlaybackSongInQueue(queue, replacement);
+        expect(updated).toEqual([replacement, queue[1], replacement]);
+        expect(queue[0]).toBe(original);
+        const absent = navidromeSong('absent');
+        expect(replacePlaybackSongInQueue(queue, absent)).toEqual([absent, ...queue]);
+    });
+
     it('keeps equal numeric ids distinct across playback sources', () => {
         const netease = neteaseSong(-1);
         const kugou = kugouSong('-1');

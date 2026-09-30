@@ -11,13 +11,43 @@ import {
     getCacheKeysByPrefix,
     getFromCache,
     removeCacheEntriesByPrefix,
+    removeFromCache,
     saveToCache,
 } from '../../../src/services/db';
+import { getPlaybackQueueCacheRevision, writePlaybackQueueCache } from '../../../src/services/repositories/cacheRepository';
+import { persistPlaybackCache } from '../../../src/components/app/playback/persistPlaybackCache';
+import type { SongResult } from '../../../src/types';
 
 // test/unit/services/dbDexieCompatibility.test.ts
 // Verifies cache routing, legacy fallback migration, prefix APIs, and selective cleanup through Dexie.
 
 describe('db Dexie compatibility facade', () => {
+    it('restores an unchanged playback queue after removal, clearing, or an external overwrite', async () => {
+        const queue: SongResult[] = [{
+            id: 1, name: 'One', artists: [], album: { id: 1, name: 'Album' }, durationMs: 1000,
+            sourceRef: { kind: 'online', providerId: 'netease', mediaId: '1' },
+        }];
+        await persistPlaybackCache(queue[0], queue);
+        const savedRevision = getPlaybackQueueCacheRevision();
+        await persistPlaybackCache(queue[0], queue);
+        expect(getPlaybackQueueCacheRevision()).toBe(savedRevision);
+        await clearCache(['last_queue']);
+        expect(getPlaybackQueueCacheRevision()).toBe(savedRevision);
+        for (const invalidate of [
+            () => removeFromCache('last_queue'),
+            () => clearCache(),
+            () => saveToCache('last_queue', []),
+            () => removeCacheEntriesByPrefix(['last_']),
+        ]) {
+            await invalidate();
+            await persistPlaybackCache(queue[0], queue);
+            expect(await getFromCache('last_queue')).toEqual(queue);
+        }
+        const receipt = await writePlaybackQueueCache(queue);
+        expect(receipt).toBe(getPlaybackQueueCacheRevision());
+        expect((await appDatabase.api_cache.get('last_queue'))?.timestamp).toBeGreaterThan(0);
+    });
+
     beforeEach(async () => {
         await appDatabase.delete();
         await appDatabase.open();

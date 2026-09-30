@@ -54,7 +54,21 @@ const movedOutOfApiCache = (key: string): boolean =>
 
 const getTable = (name: CacheTableName): Table<StoredCacheEntry, string> => appDatabase.table(name);
 
+let playbackQueueCacheRevision = 0;
+export const getPlaybackQueueCacheRevision = (): number => playbackQueueCacheRevision;
+export const invalidatePlaybackQueueCache = (): void => { playbackQueueCacheRevision += 1; };
+
+// 返回本次写入的版本，供播放缓存去重；外部覆盖或清空后必须重新保存。
+export const writePlaybackQueueCache = async (data: unknown): Promise<number> => {
+  await getTable('api_cache').put({ key: 'last_queue', data, timestamp: Date.now() });
+  return ++playbackQueueCacheRevision;
+};
+
 export const putCacheEntry = async (key: string, data: unknown): Promise<void> => {
+  if (key === 'last_queue') {
+    await writePlaybackQueueCache(data);
+    return;
+  }
   await getTable(getCacheTableName(key)).put({ key, data, timestamp: Date.now() });
 };
 
@@ -131,6 +145,7 @@ export const removeCacheEntries = async (keys: string[]): Promise<void> => {
   await appDatabase.transaction('rw', CACHE_TABLE_NAMES, async () => {
     await Promise.all(CACHE_TABLE_NAMES.map(name => getTable(name).bulkDelete(keys)));
   });
+  if (keys.includes('last_queue')) invalidatePlaybackQueueCache();
 };
 
 export const removeCacheEntriesByPrefix = async (prefixes: string[]): Promise<void> => {
@@ -139,6 +154,7 @@ export const removeCacheEntriesByPrefix = async (prefixes: string[]): Promise<vo
 
 export const removeCacheEntry = async (key: string): Promise<void> => {
   await getTable(getCacheTableName(key)).delete(key);
+  if (key === 'last_queue') invalidatePlaybackQueueCache();
 };
 
 export const clearCacheTables = async (preserveKeys: string[] = []): Promise<void> => {
@@ -155,6 +171,7 @@ export const clearCacheTables = async (preserveKeys: string[] = []): Promise<voi
       await table.bulkDelete(deletedKeys);
     }));
   });
+  if (!preserved.has('last_queue')) invalidatePlaybackQueueCache();
 };
 
 const getEntrySize = (entry: StoredCacheEntry): number => {

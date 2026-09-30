@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import type { MotionValue } from 'framer-motion';
 import { applyOnlineAudioSourceMetadata, loadOnlineSongAudioSource, loadOnlineSongLyrics } from '../services/onlinePlayback';
@@ -297,9 +297,20 @@ export function usePlaybackQueueController({
     }, []);
 
     // Keeps unavailable provider entries in the queue so they can be retried after configuration changes.
+    // 队列按不可变数组使用，播放本身不需要复制或改变磁贴顺序。
     const getPlayableOnlineQueue = useCallback((queue: SongResult[]) => {
-        return [...queue];
+        return queue;
     }, []);
+
+    // 本地库变化时重建索引，避免每次跳转都为队列里的每首歌扫描整个库。
+    const localSongIndex = useMemo(() => {
+        const index = new Map<string, LocalSong>();
+        for (const song of localSongs) {
+            const songId = song.id;
+            if (!index.has(songId)) index.set(songId, song);
+        }
+        return index;
+    }, [localSongs]);
 
     const getNextPlayableQueueSong = useCallback((queue: SongResult[], song: SongResult) => {
         const currentSongKey = getPlaybackSongKey(song);
@@ -507,7 +518,7 @@ export function usePlaybackQueueController({
         }
 
         if (isLocal) {
-            const localData = localSongs.find(ls => ls.id === song.localRef.songId) ?? null;
+            const localData = localSongIndex.get(song.localRef.songId) ?? null;
 
             if (!localData) {
                 setStatusMsg({ type: 'error', text: t('status.localFilePlaybackError') });
@@ -518,7 +529,7 @@ export function usePlaybackQueueController({
             const localQueue = queueContext
                 .map(queuedSong => {
                     const songId = (queuedSong as UnifiedSong).localRef?.songId;
-                    return songId ? localSongs.find(localSong => localSong.id === songId) : undefined;
+                    return songId ? localSongIndex.get(songId) : undefined;
                 })
                 .filter((queuedSong): queuedSong is LocalSong => Boolean(queuedSong));
             await onPlayLocalSong(resolvedLocalData, localQueue, {
@@ -738,7 +749,7 @@ export function usePlaybackQueueController({
         interruptStagePlaybackForMainTransition,
         isFmMode,
         lastAudioRecoverySourceRef,
-        localSongs,
+        localSongIndex,
         navigateToPlaybackView,
         onPlayLocalSong,
         onPlayNavidromeSong,

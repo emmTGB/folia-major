@@ -14,6 +14,7 @@ import {
   getBrowserCacheUsage,
   getBrowserCacheUsageByCategory,
   getCacheKeysByPrefix,
+  invalidatePlaybackQueueCache,
   putCacheEntry,
   readCacheEntriesByKey,
   readCacheEntriesByPrefix,
@@ -254,6 +255,7 @@ export const clearAllData = async (): Promise<void> => {
     await clearLocalCoverBinaries();
     resetLocalCoverAssetRuntime();
     await appDatabase.delete();
+    invalidatePlaybackQueueCache();
     await appDatabase.open();
   } catch (error) {
     console.error('Failed to clear all data', error);
