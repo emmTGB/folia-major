@@ -3,6 +3,7 @@ import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from 'reac
 import type { MotionValue } from 'framer-motion';
 import { LyricParserFactory } from '../utils/lyrics/LyricParserFactory';
 import { getFromCache, removeFromCache, saveToCache } from '../services/db';
+import { createCoverSnapshotRef } from '../services/coverObjectUrls';
 import { NowPlayingProvider } from '../services/nowPlayingProvider';
 import { usePlayerCapSource } from './usePlayerCapSource';
 import { findLatestActiveLineIndex, hasRenderableLyrics } from '../utils/appPlaybackHelpers';
@@ -133,8 +134,12 @@ export function useStagePlaybackController({
         lastError: null,
     });
 
-    const mainPlaybackSnapshotRef = useRef<PlaybackSnapshot | null>(null);
-    const stagePlaybackSnapshotRef = useRef<PlaybackSnapshot | null>(null);
+    const [mainPlaybackSnapshotRef] = useState(() => createCoverSnapshotRef<PlaybackSnapshot>());
+    const [stagePlaybackSnapshotRef] = useState(() => createCoverSnapshotRef<PlaybackSnapshot>());
+    useEffect(() => () => {
+        mainPlaybackSnapshotRef.current = null;
+        stagePlaybackSnapshotRef.current = null;
+    }, [mainPlaybackSnapshotRef, stagePlaybackSnapshotRef]);
     const lastLoadedStageEntryKeyRef = useRef<string | null>(null);
     const lastKnownMainSongRef = useRef<SongResult | null>(null);
     const lastKnownMainQueueRef = useRef<SongResult[]>([]);

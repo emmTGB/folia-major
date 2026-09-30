@@ -1,5 +1,6 @@
 import { getFromCache, removeFromCache, saveToCache } from './db';
 import { createSafeObjectUrl, isBlob } from '../utils/blobGuards';
+import { registerCoverObjectUrl } from './coverObjectUrls';
 import {
     clearCoverAssets,
     getCoverAssetUsage,
@@ -46,10 +47,10 @@ export async function getCachedCoverUrl(cacheKey: string): Promise<string | null
     if (isBlob(stored)) {
         const descriptor = await writeCoverAsset(cacheKey, stored).catch(() => null);
         if (!descriptor) {
-            return createSafeObjectUrl(stored);
+            return registerCoverObjectUrl(createSafeObjectUrl(stored));
         }
         await saveToCache(cacheKey, descriptor);
-        return createSafeObjectUrl(stored);
+        return registerCoverObjectUrl(createSafeObjectUrl(stored));
     }
 
     if (stored !== null && !isStoredCoverDescriptor(stored)) {
@@ -63,7 +64,7 @@ export async function getCachedCoverUrl(cacheKey: string): Promise<string | null
         if (stored) await removeFromCache(cacheKey);
         return null;
     }
-    return createSafeObjectUrl(cachedCover);
+    return registerCoverObjectUrl(createSafeObjectUrl(cachedCover));
 }
 
 /**
@@ -91,7 +92,7 @@ export async function loadCachedOrFetchCover(cacheKey: string, coverUrl?: string
         const coverBlob = await fetchCoverBlob(coverUrl);
         const descriptor = await writeCoverAsset(cacheKey, coverBlob).catch(() => null);
         if (descriptor) await saveToCache(cacheKey, descriptor);
-        return createSafeObjectUrl(coverBlob) || coverUrl;
+        return registerCoverObjectUrl(createSafeObjectUrl(coverBlob)) || coverUrl;
     } catch (error) {
         console.warn('Failed to cache cover:', error);
         return coverUrl;

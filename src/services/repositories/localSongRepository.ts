@@ -32,6 +32,31 @@ export const putLocalSongs = async (songs: LocalSong[]): Promise<void> => {
   }
 };
 
+// 单条读取沿用旧歌词和封面规范化，字段级回写避免覆盖并发更新的歌曲偏好。
+export const readLocalSong = async (id: string): Promise<LocalSong | undefined> => (
+  appDatabase.transaction('rw', appDatabase.local_music, async () => {
+    const stored = await appDatabase.local_music.get(id);
+    if (!stored) return undefined;
+    const normalized = normalizeLocalSongFromStorage(stored);
+    const migration = migrateMatchedLyricsCarrierRenderHints(normalized.value);
+    const updates: Partial<LocalSong> & { embeddedCover?: unknown } = {};
+    if (normalized.changed) updates.embeddedCover = undefined;
+    if (migration.changed) updates.matchedLyrics = migration.value.matchedLyrics;
+    if (normalized.changed || migration.changed) await appDatabase.local_music.update(id, updates);
+    return migration.value;
+  })
+);
+
+export const updateLocalSongLyricsSource = async (
+  id: string,
+  source: NonNullable<LocalSong['lyricsSource']>,
+): Promise<LocalSong | undefined> => (
+  appDatabase.transaction('rw', appDatabase.local_music, async () => {
+    if (!await appDatabase.local_music.update(id, { lyricsSource: source })) return undefined;
+    return readLocalSong(id);
+  })
+);
+
 export const readLocalSongs = async (): Promise<LocalSong[]> => {
   const storedSongs = await appDatabase.local_music.toArray();
   const normalized = storedSongs.map(normalizeLocalSongFromStorage);
@@ -60,4 +85,3 @@ export const removeLocalSongs = async (ids: string[]): Promise<void> => {
     await appDatabase.local_music.bulkDelete(ids);
   }
 };
-

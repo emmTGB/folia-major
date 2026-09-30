@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getCachedCoverUrl, loadCachedOrFetchCover } from '@/services/coverCache';
+import { discardCoverObjectUrl } from '@/services/coverObjectUrls';
 
 // test/unit/services/coverCache.test.ts
 // Verifies invalid persisted cover payloads degrade to cache misses and legacy Blobs migrate safely.
@@ -87,4 +88,27 @@ describe('coverCache', () => {
         expect(mocks.saveToCache).not.toHaveBeenCalled();
         expect(URL.createObjectURL).toHaveBeenCalled();
     });
+    it.each(['legacy', 'file', 'download'])('registers a %s cover for deterministic release', async source => {
+        const cover = new Blob(['cover'], { type: 'image/png' });
+        const url = `blob:owned-${source}`;
+        vi.mocked(URL.createObjectURL).mockReturnValue(url);
+        const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+        if (source === 'legacy') {
+            mocks.getFromCache.mockResolvedValue(cover);
+            mocks.writeCoverAsset.mockResolvedValue(null);
+        } else if (source === 'file') {
+            mocks.readCoverAsset.mockResolvedValue(cover);
+        } else {
+            vi.mocked(fetch).mockResolvedValue(new Response(cover));
+            mocks.writeCoverAsset.mockResolvedValue(null);
+        }
+        const result = source === 'download'
+            ? await loadCachedOrFetchCover('ownership', 'https://example.com/cover')
+            : await getCachedCoverUrl('ownership');
+        expect(result).toBe(url);
+        discardCoverObjectUrl(result);
+        expect(revoke).toHaveBeenCalledWith(url);
+        revoke.mockRestore();
+    });
+
 });

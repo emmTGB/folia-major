@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next';
 import LyricTimelineOffsetControl from './LyricTimelineOffsetControl';
 import LyricFileButton from './LyricFileButton';
 import { getLyricProviderLabel } from '../../utils/lyrics/lyricSourceLabels';
-import { getLocalSongs } from '../../services/db';
+import { getLocalSong } from '../../services/db';
 import type { LocalSong } from '../../types';
 import { isLocalPlaybackSong } from '../../utils/appPlaybackGuards';
 import ReplayGainControl from './ReplayGainControl';
@@ -62,11 +62,11 @@ const LocalTab: React.FC<LocalTabProps> = ({
         if (!localSongId) {
             return;
         }
-        void getLocalSongs().then(songs => {
+        void getLocalSong(localSongId).then(song => {
             if (active) {
                 setLoadedLocalData({
                     songId: localSongId,
-                    data: songs.find(song => song.id === localSongId) || null,
+                    data: song || null,
                 });
             }
         });

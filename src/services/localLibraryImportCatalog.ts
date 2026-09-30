@@ -135,12 +135,22 @@ export const assignImportedSongs = async (
 };
 
 // Repairs only genuinely missing assignments; the v0.8 upgrade owns legacy conversion.
-export const ensureLocalLibraryInitialized = async (): Promise<void> => {
-  const [songs, assignments] = await Promise.all([
-    appDatabase.local_music.toArray(),
-    appDatabase.local_library_assignments.toArray(),
-  ]);
-  const assignedIds = new Set(assignments.map(assignment => assignment.songId));
-  const missing = songs.filter(song => !assignedIds.has(song.id));
-  if (missing.length > 0) await assignImportedSongs(missing, { preserveNonImportAssignments: false });
+let initializationPromise: Promise<void> | null = null;
+
+export const ensureLocalLibraryInitialized = (): Promise<void> => {
+  if (initializationPromise) return initializationPromise;
+  // 并发调用共用本轮检查，只为缺失分配的歌曲读取完整记录；后续调用仍能修复新导入的歌曲。
+  initializationPromise = (async () => {
+    const [songIds, assignedSongIds] = await Promise.all([
+      appDatabase.local_music.toCollection().primaryKeys(),
+      appDatabase.local_library_assignments.toCollection().primaryKeys(),
+    ]);
+    const assignedIds = new Set(assignedSongIds);
+    const missingIds = songIds.filter(id => !assignedIds.has(id));
+    if (missingIds.length === 0) return;
+    const missing = (await appDatabase.local_music.bulkGet(missingIds))
+      .filter((song): song is LocalSong => Boolean(song));
+    if (missing.length > 0) await assignImportedSongs(missing, { preserveNonImportAssignments: false });
+  })().finally(() => { initializationPromise = null; });
+  return initializationPromise;
 };

@@ -53,6 +53,32 @@ describe('localLibraryCatalogService', () => {
         await appDatabase.delete();
     });
 
+    it('checks an initialized library without loading every song payload', async () => {
+        await assignImportedSongs([song('one'), song('two')]);
+        const readSongs = vi.spyOn(appDatabase.local_music, 'toArray');
+        const readAssignments = vi.spyOn(appDatabase.local_library_assignments, 'toArray');
+        const checkKeys = vi.spyOn(appDatabase.local_music, 'toCollection');
+
+        await Promise.all([ensureLocalLibraryInitialized(), ensureLocalLibraryInitialized()]);
+
+        expect(readSongs).not.toHaveBeenCalled();
+        expect(readAssignments).not.toHaveBeenCalled();
+        expect(checkKeys).toHaveBeenCalledTimes(1);
+    });
+
+    it('repairs newly missing assignments after an earlier check and a database reset', async () => {
+        await ensureLocalLibraryInitialized();
+        await appDatabase.local_music.put(song('later'));
+        await ensureLocalLibraryInitialized();
+        expect(await appDatabase.local_library_assignments.get('later')).toBeDefined();
+
+        await appDatabase.delete();
+        await appDatabase.open();
+        await appDatabase.local_music.put(song('after-reset'));
+        await ensureLocalLibraryInitialized();
+        expect(await appDatabase.local_library_assignments.get('after-reset')).toBeDefined();
+    });
+
     it('groups same-folder same-name albums even when track artists differ', async () => {
         await assignImportedSongs([
             song('one', { artist: 'Artist One' }),

@@ -8,6 +8,7 @@ import { omni } from '../services/onlineMusic/omni';
 import { getCachedSongCoverUrl, hasCachedSongAudio } from '../services/onlineMusic/resourceCache';
 import { getPrefetchedData, invalidateAndRefetch, prefetchNearbySongs } from '../services/prefetchService';
 import { retireBlobUrl } from '../services/playbackBlobUrls';
+import { discardCoverObjectUrl } from '../services/coverObjectUrls';
 import type { ThemeCacheSongKey } from '../services/themeCache';
 import { loadOnlineLyricsState } from '../utils/onlineLyricsState';
 import { PlayerState, type StagePlayerQueueDiffOp, type StagePlayerQueueRequest, type StagePlayerSnapshot } from '../types';
@@ -177,6 +178,13 @@ export function usePlaybackQueueController({
     const playbackRequestIdRef = useRef(0);
     /** Rising id per playSong call: a newer call supersedes an older one still awaiting `beforePlay`. */
     const playSongCallIdRef = useRef(0);
+    const pendingPlaybackResourceCleanupRef = useRef<(() => void) | null>(null);
+    useEffect(() => () => {
+        playbackRequestIdRef.current += 1;
+        playSongCallIdRef.current += 1;
+        pendingPlaybackResourceCleanupRef.current?.();
+        pendingPlaybackResourceCleanupRef.current = null;
+    }, []);
     const pendingUnavailableSkipTimerRef = useRef<number | null>(null);
     const pendingUnavailableSkipIntervalRef = useRef<number | null>(null);
 
@@ -450,6 +458,8 @@ export function usePlaybackQueueController({
         // out instead of replacing the song the user picked last.
         // An automix advance skips the hook (see `isAutomixAdvance`).
         const playSongCallId = ++playSongCallIdRef.current;
+        pendingPlaybackResourceCleanupRef.current?.();
+        pendingPlaybackResourceCleanupRef.current = null;
         const allowedSong = !options.isAutomixAdvance && hasBeforePlayHook()
             ? await runBeforePlayHook(requestedSong)
             : requestedSong;
@@ -474,11 +484,14 @@ export function usePlaybackQueueController({
         }
 
         const playbackRequestId = ++playbackRequestIdRef.current;
-        const isLatestPlaybackRequest = () => playbackRequestIdRef.current === playbackRequestId;
+        const isLatestPlaybackRequest = () => playbackRequestIdRef.current === playbackRequestId
+            && playSongCallIdRef.current === playSongCallId;
         const isLocal = isLocalPlaybackSong(song);
         const isNavidrome = isNavidromePlaybackSong(song);
         let prefetched: ReturnType<typeof getPrefetchedData> = null;
         let preloadedOnlineAudioResult: Awaited<ReturnType<typeof loadOnlineSongAudioSource>> | null = null;
+        let pendingAudioBlobUrl: string | null = null;
+        let pendingCoverUrl: string | null = null;
         const queueContext = queue.length > 0 ? queue : playQueue.length === 0 ? [song] : playQueue;
         const newQueue = getPlayableOnlineQueue(queueContext);
         const skipCount = options.unavailableSkipCount ?? 0;
@@ -548,12 +561,22 @@ export function usePlaybackQueueController({
             setStatusMsg({ type: 'info', text: t('status.loadingSong') });
         }
 
+        // 取消时立即释放已获得的资源；迟到结果由同一收尾函数处理，清空后不会重复释放。
+        const releasePendingResources = () => {
+            const audioUrl = pendingAudioBlobUrl;
+            const coverUrl = pendingCoverUrl;
+            pendingAudioBlobUrl = null;
+            pendingCoverUrl = null;
+            if (audioUrl) URL.revokeObjectURL(audioUrl);
+            discardCoverObjectUrl(coverUrl);
+        };
+        pendingPlaybackResourceCleanupRef.current = releasePendingResources;
         try {
             preloadedOnlineAudioResult = await loadOnlineSongAudioSource(song, audioQuality, prefetched);
+            pendingAudioBlobUrl = preloadedOnlineAudioResult.kind === 'ok'
+                ? preloadedOnlineAudioResult.blobUrl ?? null
+                : null;
             if (!isLatestPlaybackRequest()) {
-                if (preloadedOnlineAudioResult.kind === 'ok' && preloadedOnlineAudioResult.blobUrl) {
-                    URL.revokeObjectURL(preloadedOnlineAudioResult.blobUrl);
-                }
                 return;
             }
 
@@ -565,7 +588,7 @@ export function usePlaybackQueueController({
 
                 if (canSkip && nextSong) {
                     showTimedSkipPrompt('status.songUnavailablePrompt', () => {
-                        if (playbackRequestIdRef.current !== playbackRequestId) return;
+                        if (!isLatestPlaybackRequest()) return;
                         void playSong(nextSong, newQueue, isFmCall, {
                             ...deferredPlayOptions,
                             unavailableSkipCount: skipCount + 1,
@@ -576,117 +599,131 @@ export function usePlaybackQueueController({
                 }
                 return;
             }
-        } catch (error) {
-            console.error('[App] Failed to fetch song URL:', error);
-            setStatusMsg({ type: 'error', text: t('status.playbackError') });
-            setIsLyricsLoading(false);
-            return;
-        }
 
-        shouldAutoPlayRef.current = true;
-        const songKey = getPlaybackSongKey(song);
-        const resolvedSong = preloadedOnlineAudioResult?.kind === 'ok'
-            ? applyOnlineAudioSourceMetadata(song, preloadedOnlineAudioResult.replayGain)
-            : song;
-        const resolvedQueue = replacePlaybackSongInQueue(newQueue, resolvedSong);
-        currentSongRef.current = songKey;
-        pendingResumeTimeRef.current = null;
-        lastAudioRecoverySourceRef.current = null;
-        currentOnlineAudioUrlFetchedAtRef.current = null;
+            const songKey = getPlaybackSongKey(song);
+            const resolvedSong = preloadedOnlineAudioResult?.kind === 'ok'
+                ? applyOnlineAudioSourceMetadata(song, preloadedOnlineAudioResult.replayGain)
+                : song;
+            const resolvedQueue = replacePlaybackSongInQueue(newQueue, resolvedSong);
+            const onlineLyricsState = await loadOnlineLyricsState(song);
+            if (!isLatestPlaybackRequest()) return;
 
-        const onlineLyricsState = await loadOnlineLyricsState(song);
-
-        setLyrics(null);
-        setCurrentLineIndex(-1);
-        currentTime.set(0);
-        setDuration(0);
-        setCurrentSong({ ...resolvedSong, onlineLyricsState: onlineLyricsState ?? undefined });
-        setCachedCoverUrl(null);
-        setAudioSrc(null);
-        setIsLyricsLoading(true);
-
-        // Handed over rather than revoked here: during a blend the song this replaces is still
-        // sounding on the other deck, and taking its URL away leaves that deck unable to seek. See
-        // `retireBlobUrl` - the failure is silent and permanent, with no error event to notice it by.
-        retireBlobUrl(blobUrlRef.current);
-        blobUrlRef.current = null;
-
-        if (queue.length > 0 || playQueue.length === 0) {
-            setPlayQueue(resolvedQueue);
-        }
-
-        void persistLastPlaybackCache({ ...resolvedSong, onlineLyricsState: onlineLyricsState ?? undefined }, resolvedQueue);
-
-        if (shouldNavigateToPlayer) {
-            navigateToPlaybackView();
-        }
-        setPlayerState(PlayerState.IDLE);
-
-        const cachedCoverUrl = await getCachedSongCoverUrl(song);
-        if (currentSongRef.current !== songKey) return;
-        if (cachedCoverUrl) {
-            setCachedCoverUrl(cachedCoverUrl);
-        } else if (prefetched?.coverUrl) {
-            setCachedCoverUrl(prefetched.coverUrl);
-        }
-
-        const audioResult = preloadedOnlineAudioResult;
-        if (!audioResult || audioResult.kind !== 'ok') {
-            setStatusMsg({ type: 'error', text: t('status.playbackError') });
-            setPlayerState(PlayerState.IDLE);
-            setIsLyricsLoading(false);
-            return;
-        }
-
-        if (audioResult.blobUrl) {
-            blobUrlRef.current = audioResult.blobUrl;
+            shouldAutoPlayRef.current = true;
+            currentSongRef.current = songKey;
+            pendingResumeTimeRef.current = null;
+            lastAudioRecoverySourceRef.current = null;
             currentOnlineAudioUrlFetchedAtRef.current = null;
-        } else if (audioResult.audioSrc.startsWith('http')) {
-            currentOnlineAudioUrlFetchedAtRef.current =
-                prefetched?.audioUrl === audioResult.audioSrc
-                    ? prefetched.audioUrlFetchedAt
-                    : Date.now();
-        } else {
-            currentOnlineAudioUrlFetchedAtRef.current = null;
-        }
-        setAudioSrc(audioResult.audioSrc);
 
-        try {
-            await loadOnlineSongLyrics(song, prefetched, userId, {
-                isCurrent: () => currentSongRef.current === songKey,
-                onLyrics: resolvedLyrics => setLyrics(resolvedLyrics),
-                onPureMusicChange: isPureMusic => {
-                    setCurrentSong(prev => {
-                        if (!prev || !isSamePlaybackSong(prev, song)) return prev;
-                        return { ...prev, isPureMusic };
-                    });
-                },
-                onStateChange: state => {
-                    setCurrentSong(prev => {
-                        if (!prev || !isSamePlaybackSong(prev, song)) return prev;
-                        return { ...prev, onlineLyricsState: state ?? undefined };
-                    });
-                },
-                onAutoMatchStart: () => {
-                    setStatusMsg({ type: 'info', text: t('status.matchingBestLyrics') });
-                },
-                onDone: () => setIsLyricsLoading(false),
-            });
-        } catch (error) {
-            console.warn('[App] Lyric fetch failed', error);
             setLyrics(null);
-            setIsLyricsLoading(false);
-        }
+            setCurrentLineIndex(-1);
+            currentTime.set(0);
+            setDuration(0);
+            setCurrentSong({ ...resolvedSong, onlineLyricsState: onlineLyricsState ?? undefined });
+            setCachedCoverUrl(null);
+            setAudioSrc(null);
+            setIsLyricsLoading(true);
 
-        try {
-            await restoreCachedThemeForSong(song);
-            if (currentSongRef.current !== songKey) return;
+            // Handed over rather than revoked here: during a blend the song this replaces is still
+            // sounding on the other deck, and taking its URL away leaves that deck unable to seek. See
+            // `retireBlobUrl` - the failure is silent and permanent, with no error event to notice it by.
+            retireBlobUrl(blobUrlRef.current);
+            blobUrlRef.current = null;
+
+            if (queue.length > 0 || playQueue.length === 0) {
+                setPlayQueue(resolvedQueue);
+            }
+
+            void persistLastPlaybackCache({ ...resolvedSong, onlineLyricsState: onlineLyricsState ?? undefined }, resolvedQueue);
+
+            if (shouldNavigateToPlayer) {
+                navigateToPlaybackView();
+            }
+            setPlayerState(PlayerState.IDLE);
+
+            const cachedCoverUrl = await getCachedSongCoverUrl(song);
+            pendingCoverUrl = cachedCoverUrl;
+            if (!isLatestPlaybackRequest() || currentSongRef.current !== songKey) return;
+            if (cachedCoverUrl) {
+                setCachedCoverUrl(cachedCoverUrl);
+                pendingCoverUrl = null;
+            } else if (prefetched?.coverUrl) {
+                setCachedCoverUrl(prefetched.coverUrl);
+            }
+
+            const audioResult = preloadedOnlineAudioResult;
+            if (!audioResult || audioResult.kind !== 'ok') {
+                setStatusMsg({ type: 'error', text: t('status.playbackError') });
+                setPlayerState(PlayerState.IDLE);
+                setIsLyricsLoading(false);
+                return;
+            }
+
+            if (audioResult.blobUrl) {
+                blobUrlRef.current = audioResult.blobUrl;
+                currentOnlineAudioUrlFetchedAtRef.current = null;
+            } else if (audioResult.audioSrc.startsWith('http')) {
+                currentOnlineAudioUrlFetchedAtRef.current =
+                    prefetched?.audioUrl === audioResult.audioSrc
+                        ? prefetched.audioUrlFetchedAt
+                        : Date.now();
+            } else {
+                currentOnlineAudioUrlFetchedAtRef.current = null;
+            }
+            setAudioSrc(audioResult.audioSrc);
+            pendingAudioBlobUrl = null;
+
+            try {
+                await loadOnlineSongLyrics(song, prefetched, userId, {
+                    isCurrent: () => isLatestPlaybackRequest() && currentSongRef.current === songKey,
+                    onLyrics: resolvedLyrics => setLyrics(resolvedLyrics),
+                    onPureMusicChange: isPureMusic => {
+                        setCurrentSong(prev => {
+                            if (!prev || !isSamePlaybackSong(prev, song)) return prev;
+                            return { ...prev, isPureMusic };
+                        });
+                    },
+                    onStateChange: state => {
+                        setCurrentSong(prev => {
+                            if (!prev || !isSamePlaybackSong(prev, song)) return prev;
+                            return { ...prev, onlineLyricsState: state ?? undefined };
+                        });
+                    },
+                    onAutoMatchStart: () => {
+                        setStatusMsg({ type: 'info', text: t('status.matchingBestLyrics') });
+                    },
+                    onDone: () => setIsLyricsLoading(false),
+                });
+            } catch (error) {
+                console.warn('[App] Lyric fetch failed', error);
+                if (isLatestPlaybackRequest() && currentSongRef.current === songKey) {
+                    setLyrics(null);
+                    setIsLyricsLoading(false);
+                }
+            }
+            if (!isLatestPlaybackRequest() || currentSongRef.current !== songKey) return;
+
+            try {
+                await restoreCachedThemeForSong(song);
+            } catch (error) {
+                console.warn('Theme load error', error);
+            }
+            if (!isLatestPlaybackRequest() || currentSongRef.current !== songKey) return;
+
+            if (newQueue.length > 1) {
+                prefetchNearbySongs(resolvedSong, resolvedQueue, audioQuality, userId);
+            }
         } catch (error) {
-            console.warn('Theme load error', error);
-        }
-
-        if (newQueue.length > 1) {
-            prefetchNearbySongs(resolvedSong, resolvedQueue, audioQuality, userId);
+            console.error('[App] Playback loading failed:', error);
+            if (isLatestPlaybackRequest()) {
+                setStatusMsg({ type: 'error', text: t('status.playbackError') });
+                setIsLyricsLoading(false);
+            }
+        } finally {
+            // 只释放本请求创建且尚未交给播放/显示状态的 URL，已移交资源沿用原生命周期。
+            releasePendingResources();
+            if (pendingPlaybackResourceCleanupRef.current === releasePendingResources) {
+                pendingPlaybackResourceCleanupRef.current = null;
+            }
         }
     }, [
         audioQuality,

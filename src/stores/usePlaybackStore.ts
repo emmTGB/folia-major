@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { createCoverObjectUrlOwner } from '../services/coverObjectUrls';
 import type React from 'react';
 import { PlayerState, type ActiveLocalLyricsSource, type LyricData, type PlaybackContext, type ReplayGainMode, type SongResult } from '../types';
 import { createCoverUrlResolver } from '../components/app/playback/createCoverUrlResolver';
@@ -115,6 +116,13 @@ export const usePlaybackStore = create<PlaybackStoreState>((set, get) => ({
     setLyricTimelineOffsetMs: (next) => set({ lyricTimelineOffsetMs: resolve(next, get().lyricTimelineOffsetMs) }),
     setTransitionDisplay: (next) => set({ transitionDisplay: resolve(next, get().transitionDisplay) }),
 }));
+
+// 当前封面和过渡快照共同持有资源；直接 setState 与现有 setter 走同一生命周期。
+const ownPlaybackCovers = createCoverObjectUrlOwner();
+usePlaybackStore.subscribe((state, previous) => {
+    if (state.cachedCoverUrl === previous.cachedCoverUrl && state.transitionDisplay?.coverUrl === previous.transitionDisplay?.coverUrl) return;
+    ownPlaybackCovers([state.cachedCoverUrl, state.transitionDisplay?.coverUrl]);
+});
 
 // ---- module-level setters ----
 //

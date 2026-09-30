@@ -25,7 +25,9 @@ import {
   type CacheTableName,
 } from './repositories/cacheRepository';
 import {
+  readLocalSong,
   readLocalSongs,
+  updateLocalSongLyricsSource,
 } from './repositories/localSongRepository';
 import { clearSessionValues, putSessionValue, readSession } from './repositories/sessionRepository';
 import { readThemeRegistryEntries, writeThemeRegistryEntries } from './repositories/themeRegistryRepository';
@@ -206,6 +208,17 @@ export const saveLocalSongs = async (songs: LocalSong[]): Promise<void> => {
   await ensureLocalLibraryInitialized();
   await assignImportedSongs(songs);
 };
+
+export const getLocalSong = async (id: string): Promise<LocalSong | undefined> => {
+  try {
+    return await readLocalSong(id);
+  } catch (error) {
+    console.error('Failed to get local song', error);
+    return undefined;
+  }
+};
+
+export const saveLocalSongLyricsSource = updateLocalSongLyricsSource;
 
 export const getLocalSongs = async (): Promise<LocalSong[]> => {
   try {
