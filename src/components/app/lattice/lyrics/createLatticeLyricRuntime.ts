@@ -15,7 +15,7 @@ interface Track { view: LatticeLineView; y: number; vy: number; scale: number; v
     alpha: number; blur: number; fromAlpha: number; fromBlur: number; elapsed: number;
     status: MonetVisibleLineEntry['status']; offset: number; leaving: boolean; }
 const ease = cubicBezier(0.32, 0.72, 0, 1);
-let initialization: Promise<unknown> = Promise.resolve();
+let initialization: Promise<void> = Promise.resolve();
 
 /**
  * Device pixels per CSS pixel the canvas, its filter passes and its glyph textures are rendered at.
@@ -30,15 +30,21 @@ export const latticeLyricResolution = (devicePixelRatio: number) =>
     Math.min(2, Math.max(1, Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? Math.ceil(devicePixelRatio) : 1));
 
 // Passing boolean `true` makes Pixi release module-global pools shared with the Player renderer.
-const destroyApplication = (app: import('pixi.js').Application) => {
+const destroyApplication = (app: import('pixi.js').Application, pixi: typeof import('pixi.js')) => {
+    const canvas = app.canvas;
     app.destroy({ removeView: true }, { children: true });
+    canvas.width = canvas.height = 0;
+    // Clear only idle texture/canvas buckets. Checked-out resources in the Player stay valid.
+    pixi.TexturePool.clear();
+    pixi.CanvasPool.clear();
 };
 
 /** Serializes creation so a canceled async mount cannot temporarily allocate a second WebGL context. */
 export function createLatticeLyricRuntime(host: HTMLElement, initial: LatticeLyricInput,
     signal: AbortSignal, onError: (error: unknown) => void): Promise<LatticeLyricRuntime | null> {
     const pending = initialization.then(() => initialize(host, initial, signal, onError));
-    initialization = pending.catch(() => undefined);
+    // A serialization barrier must not retain the last runtime as its fulfilled value.
+    initialization = pending.then(() => undefined, () => undefined);
     return pending;
 }
 
@@ -50,13 +56,13 @@ async function initialize(host: HTMLElement, initial: LatticeLyricInput, signal:
     try { await app.init({ preference: 'webgl', backgroundAlpha: 0, antialias: true,
         width: 1, height: 1, resolution: latticeLyricResolution(window.devicePixelRatio), autoDensity: true, autoStart: false, sharedTicker: false }); }
     catch (error) {
-        if (app.renderer) destroyApplication(app);
+        if (app.renderer) destroyApplication(app, pixi);
         else { app.ticker?.destroy(); app.stage.destroy({ children: true }); }
         throw error;
     }
-    if (signal.aborted) { destroyApplication(app); return null; }
+    if (signal.aborted) { destroyApplication(app, pixi); return null; }
     try { return attachRuntime(pixi, app, host, initial, onError); }
-    catch (error) { destroyApplication(app); throw error; }
+    catch (error) { destroyApplication(app, pixi); throw error; }
 }
 
 /** Attaches a successfully initialized renderer; failures above this boundary release the WebGL context. */
@@ -170,7 +176,9 @@ function attachRuntime(pixi: typeof import('pixi.js'), app: import('pixi.js').Ap
         setVisible(visible) { loop.setVisible(visible); },
         destroy() {
             if (destroyed) return;
-            destroyed = true; unsubscribe(); loop.destroy(); clear(); edge.filter.destroy(); destroyApplication(app);
+            destroyed = true; unsubscribe(); loop.destroy(); clear(); edge.filter.destroy();
+            raster.clearMeasureCache(); reportError = () => {};
+            destroyApplication(app, pixi);
         },
     };
     return runtime;

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useIsPresent } from 'framer-motion';
 import { createLatticeLyricRuntime } from './createLatticeLyricRuntime';
 import { startLatticeLyricSession } from './latticeLyricSession';
 import type { LatticeLyricInput, LatticeLyricRuntime } from './types';
@@ -37,6 +38,8 @@ const takeParkedRuntime = (clock: object) => {
 
 /** Observes the local content box (not transformed screen bounds) and owns all external subscriptions. */
 export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>, input: LatticeLyricInput | null) {
+    const isPresent = useIsPresent();
+    const present = useRef(isPresent); present.current = isPresent;
     const runtimeRef = useRef<LatticeLyricRuntime | null>(null);
     const latest = useRef(input); latest.current = input;
     const devicePixelRatio = useDevicePixelRatio();
@@ -103,7 +106,8 @@ export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>,
             document.removeEventListener('visibilitychange', onVisibility);
             host.removeEventListener('webglcontextlost', onContextLost, true);
             const released = session.release();
-            if (released && runtimeRef.current === released) parkRuntime(initial.currentTime, released);
+            // Reuse between cards, but release immediately after the whole queue's exit animation.
+            if (released && runtimeRef.current === released && present.current) parkRuntime(initial.currentTime, released);
             else released?.destroy();
             runtimeRef.current = null;
         };

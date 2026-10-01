@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useMotionValue } from 'framer-motion';
+import { AnimatePresence, motion, useMotionValue } from 'framer-motion';
 import Lattice from '../../src/components/app/lattice/Lattice';
 import { PlayerState, type Line, type SongResult } from '../../src/types';
 import type { ProbeDefinition } from './definition';
@@ -54,6 +54,7 @@ function LatticeProbe({ covers = 'off', queueLength = 12, withLyrics = false }:
     );
     const time = useMotionValue(42);
     const [songs, setSongs] = useState(source);
+    const [present, setPresent] = useState(true);
     const [currentSong, setCurrentSong] = useState<SongResult | null>(source[0]);
     const [loopMode, setLoopMode] = useState<'off' | 'all' | 'one'>('all');
     const [command, setCommand] = useState('');
@@ -65,6 +66,8 @@ function LatticeProbe({ covers = 'off', queueLength = 12, withLyrics = false }:
     const isCurrentSongPosterVisible = useLatticeControlsStore(state => state.isCurrentSongPosterVisible);
     return <div style={{ height: '100vh' }} data-loop={loopMode} data-command={command} data-toggles={toggles} data-backs={backs} data-seek={seek}
         data-current-song-poster-visible={isCurrentSongPosterVisible}>
+        <AnimatePresence initial={false}>
+        {present && <motion.div key="queue" style={{ height: '100%' }} exit={{ opacity: 0 }} transition={{ duration: 0.62 }}>
         <Lattice lyrics={withLyrics ? { lines: lyricLines } : null} controls={{ loopMode,
             playback: { prev: () => setCurrentSong(source[Math.max(0, source.indexOf(currentSong!) - 1)]),
                 next: () => setCurrentSong(source[(source.indexOf(currentSong!) + 1) % source.length]),
@@ -77,6 +80,8 @@ function LatticeProbe({ covers = 'off', queueLength = 12, withLyrics = false }:
             currentTime={time} playbackDuration={playbackDuration} canTogglePlayback isDaylight={false}
             onBack={() => setBacks(value => value + 1)} onOpenPlayer={() => {}} onPlaySong={song => setCurrentSong(song)}
             onTogglePlayback={() => setToggles(value => value + 1)} onSeek={setSeek} />
+        </motion.div>}
+        </AnimatePresence>
         <AppOverlays model={{
             floatingControls: currentSong ? {
                 currentSong,
@@ -104,6 +109,7 @@ function LatticeProbe({ covers = 'off', queueLength = 12, withLyrics = false }:
             } : null,
         }} />
         <div style={{ position: 'fixed', right: 0, top: 0, zIndex: 100 }}>
+            <button onClick={() => setPresent(value => !value)}>{present ? 'Leave queue' : 'Return to queue'}</button>
             <button onClick={() => setCurrentSong(source[(source.indexOf(currentSong!) + 1) % source.length])}>Next track</button>
             <button onClick={() => setSongs(value => [...value].reverse())}>Reverse queue</button>
             <button onClick={() => setSongs(value => value.filter(song => song.id !== '3'))}>Remove poster 3</button>

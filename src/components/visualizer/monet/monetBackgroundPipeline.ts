@@ -5,7 +5,23 @@ import type { MonetBackgroundImage, MonetBackgroundTuning, Theme } from '../../.
 // Builds and caches the static Monet poster background so the visualizer only recomputes when inputs change.
 const MONET_BACKGROUND_WIDTH = 1920;
 const MONET_BACKGROUND_HEIGHT = 1080;
-const monetBackgroundCache = new Map<string, Promise<string | null>>();
+const MONET_BACKGROUND_CACHE_ENTRIES = 8;
+// Conservatively account for two bytes per UTF-16 code unit, regardless of engine compression.
+// Sample 1080p outputs use about 0.3 MiB each; leave headroom for more detailed images.
+const MONET_BACKGROUND_CACHE_BYTES = 8 * 1024 * 1024;
+const monetBackgroundCache = new Map<string, { promise: Promise<string | null>; bytes: number }>();
+let monetBackgroundCacheBytes = 0;
+
+// Pending entries share the LRU limit; evicted work may finish for its caller but cannot rejoin the cache.
+const trimMonetBackgroundCache = () => {
+    while (monetBackgroundCache.size > MONET_BACKGROUND_CACHE_ENTRIES
+        || monetBackgroundCacheBytes > MONET_BACKGROUND_CACHE_BYTES) {
+        const oldest = monetBackgroundCache.entries().next().value;
+        if (!oldest) break;
+        monetBackgroundCache.delete(oldest[0]);
+        monetBackgroundCacheBytes -= oldest[1].bytes;
+    }
+};
 
 interface BuildMonetBackgroundOptions {
     coverUrl?: string | null;
@@ -352,10 +368,26 @@ export const resolveMonetBackgroundDataUrl = (options: BuildMonetBackgroundOptio
     const cacheKey = getMonetBackgroundCacheKey(options);
     const cached = monetBackgroundCache.get(cacheKey);
     if (cached) {
-        return cached;
+        monetBackgroundCache.delete(cacheKey);
+        monetBackgroundCache.set(cacheKey, cached);
+        return cached.promise;
     }
 
-    const next = buildMonetBackgroundDataUrl(options).catch(() => null);
-    monetBackgroundCache.set(cacheKey, next);
-    return next;
+    const entry = { promise: Promise.resolve<string | null>(null), bytes: 0 };
+    entry.promise = buildMonetBackgroundDataUrl(options).catch(() => null).then(result => {
+        if (monetBackgroundCache.get(cacheKey) !== entry) return result;
+        if (result === null) {
+            monetBackgroundCache.delete(cacheKey);
+        } else if (result.length * 2 > MONET_BACKGROUND_CACHE_BYTES) {
+            monetBackgroundCache.delete(cacheKey);
+        } else {
+            entry.bytes = result.length * 2;
+            monetBackgroundCacheBytes += entry.bytes;
+            trimMonetBackgroundCache();
+        }
+        return result;
+    });
+    monetBackgroundCache.set(cacheKey, entry);
+    trimMonetBackgroundCache();
+    return entry.promise;
 };

@@ -50,6 +50,8 @@ export function createLatticeRaster(pixi: typeof import('pixi.js')) {
         // Keep the explicit 1: omitted, the derivation divides by undefined and only works because
         // TextureSource treats the resulting NaN as "no width given".
         const source = new pixi.CanvasSource({ resource: surface, resolution: 1 });
+        // Release the bitmap immediately when its owning glyph retires, independently of DOM GC.
+        source.once('destroy', () => { surface.width = surface.height = 0; });
         source.resolution = resolution;
         return { texture: new pixi.Texture({ source }), width, height, pad };
     };
