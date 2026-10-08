@@ -959,14 +959,23 @@ async function buildImportedSong(
     };
 }
 
-async function hydrateSongMetadata(song: LocalSong): Promise<LocalSong> {
+interface HydratedImportSong {
+    song: LocalSong;
+    cover?: Blob;
+}
+
+// Keep cover payloads scoped to the batch that will save them, never the global staging map.
+async function hydrateSongMetadata(song: LocalSong, isCancelled: () => boolean): Promise<HydratedImportSong | undefined> {
+    if (isCancelled()) return;
+    let cover: Blob | undefined;
     const fileHandle = fileHandleMap.get(song.id) || song.fileHandle;
     if (!fileHandle) {
-        return song;
+        return { song };
     }
 
     try {
         const file = await fileHandle.getFile();
+        if (isCancelled()) return;
         const includeCover = song.localCoverSource !== 'folder';
         let embeddedMetadata: EmbeddedMetadata;
         let coverHydrationFailed = false;
@@ -974,12 +983,14 @@ async function hydrateSongMetadata(song: LocalSong): Promise<LocalSong> {
         try {
             embeddedMetadata = await extractEmbeddedMetadata(file, includeCover);
         } catch (coverError) {
+            if (isCancelled()) return;
             if (!includeCover) throw coverError;
             coverHydrationFailed = true;
             console.warn(`[LocalMusic][Import] Cover-aware metadata parsing failed for ${song.fileName}; retrying without covers.`, coverError);
             embeddedMetadata = await extractEmbeddedMetadata(file, false);
         }
 
+        if (isCancelled()) return;
         song.duration = embeddedMetadata.duration || song.duration || 0;
         song.fileSize = file.size;
         // Kept in step with fileSize: buildLocalSourceRevision reads both, so refreshing only one
@@ -1011,7 +1022,7 @@ async function hydrateSongMetadata(song: LocalSong): Promise<LocalSong> {
         song.replayGainAlbumGain = embeddedMetadata.replayGainAlbumGain;
         song.replayGainAlbumPeak = embeddedMetadata.replayGainAlbumPeak;
         if (includeCover) {
-            stageLocalCoverAsset(embeddedMetadata.coverAssetId, embeddedMetadata.cover);
+            cover = embeddedMetadata.cover;
             song.localCoverAssetId = embeddedMetadata.coverAssetId;
             song.localCoverSource = embeddedMetadata.cover ? 'embedded' : undefined;
             song.localCoverNeedsAssetMigration = coverHydrationFailed ? true : undefined;
@@ -1020,7 +1031,7 @@ async function hydrateSongMetadata(song: LocalSong): Promise<LocalSong> {
         console.warn(`[LocalMusic][Import] Failed to hydrate metadata for ${song.fileName}:`, error);
     }
 
-    return song;
+    return isCancelled() ? undefined : { song, cover };
 }
 
 const removedRootGenerations = new Map<string, number>();
@@ -1028,7 +1039,9 @@ const removedRootGenerations = new Map<string, number>();
 async function hydrateImportedSongsInBackground(rootFolderName: string, songs: LocalSong[]) {
     const rootGeneration = removedRootGenerations.get(rootFolderName);
     const hydrationStartedAt = performance.now();
-    const pendingBatch: LocalSong[] = [];
+    const pendingBatch: HydratedImportSong[] = [];
+    let stopped = false;
+    const isCancelled = () => stopped || removedRootGenerations.get(rootFolderName) !== rootGeneration;
     let savedCount = 0;
     let nextIndex = 0;
     let flushInFlight: Promise<void> | null = null;
@@ -1051,10 +1064,15 @@ async function hydrateImportedSongsInBackground(rootFolderName: string, songs: L
         const batch = pendingBatch.splice(0, pendingBatch.length);
         const currentFlush = (async () => {
             await runLocalFolderMutation(async () => {
-                if (removedRootGenerations.get(rootFolderName) !== rootGeneration) return;
+                if (isCancelled()) return;
                 const ignoredPaths = (await getLocalLibrarySnapshot(rootFolderName))?.ignoredFolderPaths || [];
-                const visibleBatch = batch.filter(song => !isLocalFolderIgnored(song.folderName || song.filePath, ignoredPaths));
-                if (visibleBatch.length > 0) await saveLocalSongs(visibleBatch);
+                if (isCancelled()) return;
+                const visibleBatch = batch.filter(({ song }) => !isLocalFolderIgnored(song.folderName || song.filePath, ignoredPaths));
+                const covers = new Map<string, Blob>();
+                for (const { song, cover } of visibleBatch) {
+                    if (song.localCoverAssetId && cover) covers.set(song.localCoverAssetId, cover);
+                }
+                if (visibleBatch.length > 0) await saveLocalSongs(visibleBatch.map(entry => entry.song), covers);
             });
             savedCount += batch.length;
             if (forceNotify || savedCount % HYDRATION_REFRESH_EVERY === 0 || savedCount === songs.length) {
@@ -1085,7 +1103,9 @@ async function hydrateImportedSongsInBackground(rootFolderName: string, songs: L
                 return;
             }
 
-            const hydratedSong = await hydrateSongMetadata(songs[currentIndex]);
+            if (isCancelled()) return;
+            const hydratedSong = await hydrateSongMetadata(songs[currentIndex], isCancelled);
+            if (!hydratedSong || isCancelled()) return;
 
             pendingBatch.push(hydratedSong);
 
@@ -1106,6 +1126,8 @@ async function hydrateImportedSongsInBackground(rootFolderName: string, songs: L
         }
         console.log(`[LocalMusic][Import] Background metadata hydration for "${rootFolderName}" finished in ${formatImportDuration(performance.now() - hydrationStartedAt)}.`);
     } finally {
+        stopped = true;
+        pendingBatch.length = 0;
         notifyLocalMusicScanProgress({
             active: false,
             folderName: rootFolderName,

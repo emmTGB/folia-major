@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { EMBEDDED_METADATA_VERSION, importFolder, resyncFolder } from '../../../src/services/localMusicService';
+import { EMBEDDED_METADATA_VERSION, importFolder, resyncFolder, removeImportedRoot } from '../../../src/services/localMusicService';
 import {
     getDirHandles,
     getFromCache,
@@ -11,6 +11,7 @@ import {
 } from '../../../src/services/db';
 import {
     prepareLocalCoverBlob,
+    stageLocalCoverAsset,
 } from '../../../src/services/localCoverAssetService';
 import { parseEmbeddedMetadataAsync } from '../../../src/utils/localMetadataWorkerClient';
 import type { LocalLibrarySnapshot, LocalSong } from '../../../src/types';
@@ -404,4 +405,68 @@ describe('local music cover import', () => {
         await vi.waitFor(() => expect(parseEmbeddedMetadataAsync).toHaveBeenCalledTimes(fileCount));
         await vi.waitFor(() => expect(hydratedSaveSongCount).toBe(fileCount));
     });
+    it('stops a removed root after at most the active metadata requests without staging their covers', async () => {
+        const fileCount = 100;
+        const handle = new FakeDirectoryHandle('Music', [
+            new FakeDirectoryHandle('Album', Array.from({ length: fileCount }, (_, i) => new FakeFileHandle(i + '.mp3'))),
+        ]);
+        vi.mocked((window as any).showDirectoryPicker).mockResolvedValue(handle as unknown as FileSystemDirectoryHandle);
+        let release!: () => void;
+        const blocked = new Promise<void>(resolve => { release = resolve; });
+        vi.mocked(parseEmbeddedMetadataAsync).mockImplementation(async () => {
+            await blocked;
+            return { duration: 1, cover: new Blob(['cover'], { type: 'image/png' }), coverAssetId: 'sha256:' + 'a'.repeat(64) };
+        });
+        await importFolder();
+        await vi.waitFor(() => expect(parseEmbeddedMetadataAsync).toHaveBeenCalledTimes(6));
+        await removeImportedRoot('Music');
+        release();
+        await vi.waitFor(() => expect(vi.mocked(window.dispatchEvent).mock.calls.some(([event]) => (
+            event.type === 'folia-local-music-scan-progress' && (event as any).init?.detail.active === false
+        ))).toBe(true));
+        expect(parseEmbeddedMetadataAsync).toHaveBeenCalledTimes(6);
+        expect(stageLocalCoverAsset).not.toHaveBeenCalled();
+        expect(saveLocalSongs).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not stage covers of a folder ignored while metadata was being parsed', async () => {
+        vi.mocked((window as any).showDirectoryPicker).mockResolvedValue(createLibrary() as unknown as FileSystemDirectoryHandle);
+        let release!: () => void;
+        const blocked = new Promise<void>(resolve => { release = resolve; });
+        vi.mocked(parseEmbeddedMetadataAsync).mockImplementation(async () => {
+            await blocked;
+            return { duration: 1, cover: new Blob(['cover'], { type: 'image/png' }), coverAssetId: 'sha256:' + 'b'.repeat(64) };
+        });
+        await importFolder();
+        await vi.waitFor(() => expect(parseEmbeddedMetadataAsync).toHaveBeenCalledTimes(2));
+        vi.mocked(getLocalLibrarySnapshot).mockResolvedValue({
+            rootFolderName: 'Music', scannedAt: 1, ignoredFolderPaths: ['Music/Album'],
+            tree: { name: 'Music', relativePath: 'Music', hash: '', files: [], children: [] },
+        });
+        release();
+        await vi.waitFor(() => expect(vi.mocked(window.dispatchEvent).mock.calls.some(([event]) => (
+            event.type === 'folia-local-music-scan-progress' && (event as any).init?.detail.active === false
+        ))).toBe(true));
+        expect(stageLocalCoverAsset).not.toHaveBeenCalled();
+        expect(saveLocalSongs).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes embedded covers only to the owning save, without global staging on failure', async () => {
+        vi.mocked((window as any).showDirectoryPicker).mockResolvedValue(createLibrary() as unknown as FileSystemDirectoryHandle);
+        const cover = new Blob(['shared'], { type: 'image/png' });
+        const assetId = 'sha256:' + 'c'.repeat(64);
+        vi.mocked(parseEmbeddedMetadataAsync).mockResolvedValue({ duration: 1, cover, coverAssetId: assetId });
+        vi.mocked(saveLocalSongs).mockImplementation(async songs => {
+            if (songs.some(song => song.embeddedMetadataVersion === EMBEDDED_METADATA_VERSION)) throw new Error('save failed');
+        });
+        const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+        await importFolder();
+        await vi.waitFor(() => expect(log).toHaveBeenCalled());
+        expect(saveLocalSongs).toHaveBeenLastCalledWith(
+            expect.any(Array), new Map([[assetId, cover]]),
+        );
+        expect(stageLocalCoverAsset).not.toHaveBeenCalled();
+        log.mockRestore();
+    });
+
 });

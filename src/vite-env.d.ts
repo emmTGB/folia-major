@@ -967,6 +967,10 @@ declare global {
       prepareVideoExportWindow: (size: { width: number; height: number }) => Promise<false | { success: boolean; dpr: number }>;
       restoreVideoExportWindow: () => Promise<boolean>;
       writeVideoExportFile: (filePath: string, data: ArrayBuffer) => Promise<boolean>;
+      beginVideoExportFile: (filePath: string) => Promise<string>;
+      appendVideoExportChunk: (sessionId: string, data: ArrayBuffer) => Promise<boolean>;
+      finishVideoExportFile: (sessionId: string) => Promise<boolean>;
+      abortVideoExportFile: (sessionId: string) => Promise<boolean>;
       getStageStatus: () => Promise<StageStatus>;
       setStageEnabled: (enabled: boolean) => Promise<StageStatus>;
       regenerateStageToken: () => Promise<StageStatus>;

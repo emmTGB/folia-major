@@ -110,9 +110,9 @@ const assignImportedSongsInTransaction = async (
 
 export const assignImportedSongs = async (
   songs: LocalSong[],
-  options: { preserveNonImportAssignments?: boolean } = {},
+  options: { preserveNonImportAssignments?: boolean; coverPayloads?: ReadonlyMap<string, Blob> } = {},
 ): Promise<void> => {
-  const songsWithValidatedCovers = await prepareLocalSongsCoverAssets(songs);
+  const songsWithValidatedCovers = await prepareLocalSongsCoverAssets(songs, options.coverPayloads);
   let replacedCoverAssetIds: string[];
   try {
     replacedCoverAssetIds = await appDatabase.transaction(

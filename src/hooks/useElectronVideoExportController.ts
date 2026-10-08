@@ -17,6 +17,7 @@ import {
     stopMediaStream,
     wait,
 } from '../services/electronVideoExport';
+import { createVideoExportChunkWriter } from '../services/electronVideoExportWriter';
 import { useTranslation } from 'react-i18next';
 import { usePlaybackStore } from '../stores/usePlaybackStore';
 import { useAppChromeStore } from '../stores/useAppChromeStore';
@@ -35,8 +36,6 @@ type UseElectronVideoExportControllerOptions = {
 
 const COUNTDOWN_SECONDS = 3;
 
-const toArrayBuffer = (blob: Blob) => blob.arrayBuffer();
-
 export const useElectronVideoExportController = ({
     isElectronWindow,
     audioRef,
@@ -52,11 +51,15 @@ export const useElectronVideoExportController = ({
 
     const [exportState, setExportState] = useState<VideoExportState>(idleVideoExportState);
     const recorderRef = useRef<MediaRecorder | null>(null);
+    const fileWriterRef = useRef<Awaited<ReturnType<typeof createVideoExportChunkWriter>> | null>(null);
     const cancelRequestedRef = useRef(false);
     const runningRef = useRef(false);
 
     const stopActiveExport = useCallback((discard: boolean) => {
         cancelRequestedRef.current = discard;
+        if (discard) void fileWriterRef.current?.abort().catch(error => {
+            console.warn('[VideoExport] Could not cancel recording:', error);
+        });
         const recorder = recorderRef.current;
         if (recorder && recorder.state !== 'inactive') {
             recorder.stop();
@@ -80,7 +83,7 @@ export const useElectronVideoExportController = ({
         }
 
         const electron = window.electron;
-        if (!electron?.chooseVideoExportPath || !electron.getMainWindowCaptureSource || !electron.prepareVideoExportWindow || !electron.restoreVideoExportWindow || !electron.writeVideoExportFile) {
+        if (!electron?.chooseVideoExportPath || !electron.getMainWindowCaptureSource || !electron.prepareVideoExportWindow || !electron.restoreVideoExportWindow || !electron.beginVideoExportFile || !electron.appendVideoExportChunk || !electron.finishVideoExportFile || !electron.abortVideoExportFile) {
             setExportState({
                 ...idleVideoExportState(),
                 status: 'error',
@@ -92,6 +95,7 @@ export const useElectronVideoExportController = ({
 
         runningRef.current = true;
         cancelRequestedRef.current = false;
+        let fileWriter: Awaited<ReturnType<typeof createVideoExportChunkWriter>> | null = null;
         let videoStream: MediaStream | null = null;
         let audioStream: MediaStream | null = null;
         let combinedStream: MediaStream | null = null;
@@ -184,13 +188,14 @@ export const useElectronVideoExportController = ({
                 }
             }
 
-            const chunks: Blob[] = [];
+            let rejectRecording!: (error: Error) => void;
             const recorder = new MediaRecorder(combinedStream, getVideoExportRecorderOptions(preset, exportFormat));
             recorderRef.current = recorder;
             const stopped = new Promise<void>((resolve, reject) => {
+                rejectRecording = reject;
                 recorder.ondataavailable = event => {
                     if (event.data.size > 0) {
-                        chunks.push(event.data);
+                        if (!cancelRequestedRef.current) fileWriter?.enqueue(event.data);
                     }
                 };
                 recorder.onerror = () => reject(new Error(t('export.recorderUnknownError')));
@@ -201,6 +206,14 @@ export const useElectronVideoExportController = ({
                     recorder.stop();
                 }
             };
+            // Observe early recorder errors even if playback startup fails before awaiting stop.
+            void stopped.catch(() => {});
+            fileWriter = await createVideoExportChunkWriter(electron, saveResult.filePath, {
+                overflowMessage: t('export.writeBufferExceeded'),
+                onError: error => { requestStop(); rejectRecording(error); },
+            });
+            fileWriterRef.current = fileWriter;
+            if (cancelRequestedRef.current) throw new Error(t('export.recordingCancelled'));
             endedListener = requestStop;
             audioElement.addEventListener('ended', requestStop, { once: true });
 
@@ -245,8 +258,7 @@ export const useElectronVideoExportController = ({
                 progress: 1,
                 elapsed: exportDuration,
             }));
-            const blob = new Blob(chunks, { type: exportFormat.mimeType });
-            await electron.writeVideoExportFile(saveResult.filePath, await toArrayBuffer(blob));
+            await fileWriter.finish();
             setExportState(prev => ({
                 ...prev,
                 status: 'done',
@@ -269,6 +281,13 @@ export const useElectronVideoExportController = ({
             if (endedListener) {
                 audioElement.removeEventListener('ended', endedListener);
             }
+            const recorder = recorderRef.current;
+            if (recorder) {
+                recorder.ondataavailable = null;
+                recorder.onerror = null;
+                recorder.onstop = null;
+                if (recorder.state !== 'inactive') recorder.stop();
+            }
             recorderRef.current = null;
             stopMediaStream(videoStream);
             stopMediaStream(audioStream);
@@ -283,6 +302,10 @@ export const useElectronVideoExportController = ({
             removeCursorGuard?.();
             canvasCropCleanup?.();
             void electron.restoreVideoExportWindow();
+            await fileWriter?.abort().catch(error => {
+                console.warn('[VideoExport] Could not clean up recording:', error);
+            });
+            fileWriterRef.current = null;
             runningRef.current = false;
             cancelRequestedRef.current = false;
         }

@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const Store = require('electron-store').default || require('electron-store');
 const crypto = require('crypto');
 const { createStageApi } = require('./stageApi.cjs');
+const { createVideoExportFileWriter } = require('./videoExportFileWriter.cjs');
 const { createModSystem } = require('./modSystem/modSystem.cjs');
 const { MOD_PROTOCOL_PRIVILEGED_SCHEME } = require('./modSystem/modProtocol.cjs');
 const { createWindowPlaybackHandoffStore } = require('./windowPlaybackHandoff.cjs');
@@ -6530,6 +6531,22 @@ ipcMain.handle('video-export-restore-window', (event) => {
 
   return true;
 });
+
+
+const videoExportFileWriter = createVideoExportFileWriter();
+for (const [channel, operation] of [
+  ['video-export-begin-file', 'begin'],
+  ['video-export-append-chunk', 'write'],
+  ['video-export-finish-file', 'finish'],
+  ['video-export-abort-file', 'abort'],
+]) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isTrustedMainWindowContents(event.sender)) {
+      throw new Error('Untrusted renderer attempted to write a video export file.');
+    }
+    return videoExportFileWriter[operation](event.sender, ...args);
+  });
+}
 
 ipcMain.handle('video-export-write-file', async (event, filePath, data) => {
   if (!isTrustedMainWindowContents(event.sender)) {

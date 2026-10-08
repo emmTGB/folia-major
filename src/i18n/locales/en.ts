@@ -2930,6 +2930,7 @@ export default {
     "windowResizeFailed": "Failed to resize the player window to export resolution.",
     "recordingCancelled": "Recording cancelled.",
     "recorderUnknownError": "Recorder encountered an unknown error.",
+    "writeBufferExceeded": "Storage could not keep up with recording. Export was stopped to limit memory use.",
   },
   "player": {
     "play": "Play",

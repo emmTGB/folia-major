@@ -126,4 +126,26 @@ describe('persistPlaybackCache', () => {
         expect(writePlaybackQueueCache).toHaveBeenCalledTimes(2);
         log.mockRestore();
     });
+    it('retains only the latest pending snapshot during 100 changes of a 10,000-song queue', async () => {
+        let release!: (revision: number) => void;
+        vi.mocked(writePlaybackQueueCache).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+        const queue = Array.from({ length: 10_000 }, (_, index) => song(index, 'Song ' + index));
+        const first = persistPlaybackCache(queue[0], queue);
+        await vi.waitFor(() => expect(writePlaybackQueueCache).toHaveBeenCalledTimes(1));
+        const pending: Promise<void>[] = [];
+        let latest = queue;
+        for (let i = 0; i < 100; i++) {
+            latest = [...queue.slice(i + 1), ...queue.slice(0, i + 1)];
+            pending.push(persistPlaybackCache(latest[0], latest));
+        }
+        let lastSettled = false;
+        void pending[pending.length - 1].then(() => { lastSettled = true; });
+        await Promise.resolve();
+        expect(lastSettled).toBe(false);
+        release(++cache.revision);
+        await Promise.all([first, ...pending]);
+        expect(writePlaybackQueueCache).toHaveBeenCalledTimes(2);
+        expect((vi.mocked(writePlaybackQueueCache).mock.calls[1][0] as SongResult[])[0].id).toBe(latest[0].id);
+    });
+
 });

@@ -81,12 +81,12 @@ const toDescriptor = (
   migratedAt: Date.now(),
 } : null;
 
-const persistOneAsset = async (assetId: string, record?: LocalCoverAsset): Promise<boolean> => {
+const persistOneAsset = async (assetId: string, record?: LocalCoverAsset, scopedPayload?: Blob): Promise<boolean> => {
   if (record?.backend && await hasLocalCoverBinary(assetId)) {
     pendingPayloads.delete(assetId);
     return true;
   }
-  const payload = pendingPayloads.get(assetId) || (isBlob(record?.blob) ? record.blob : undefined);
+  const payload = scopedPayload || pendingPayloads.get(assetId) || (isBlob(record?.blob) ? record.blob : undefined);
   if (!payload) return false;
   try {
     const result = await writeLocalCoverBinary(assetId, payload);
@@ -96,7 +96,7 @@ const persistOneAsset = async (assetId: string, record?: LocalCoverAsset): Promi
     return true;
   } finally {
     // A failed write is retried by re-reading the source file, not by retaining an unbounded Blob queue.
-    pendingPayloads.delete(assetId);
+    if (pendingPayloads.get(assetId) === payload) pendingPayloads.delete(assetId);
   }
 };
 
@@ -105,6 +105,7 @@ const persistAssetsWithConcurrency = async (
   assetIds: string[],
   records: Array<LocalCoverAsset | undefined>,
   available: Set<string>,
+  coverPayloads?: ReadonlyMap<string, Blob>,
 ): Promise<void> => {
   let nextIndex = 0;
   const worker = async () => {
@@ -113,7 +114,7 @@ const persistAssetsWithConcurrency = async (
       if (index >= assetIds.length) return;
       const assetId = assetIds[index];
       try {
-        if (await persistOneAsset(assetId, records[index])) available.add(assetId);
+        if (await persistOneAsset(assetId, records[index], coverPayloads?.get(assetId))) available.add(assetId);
       } catch (error) {
         console.warn(`[LocalCoverAsset] Failed to persist ${assetId}`, error);
       }
@@ -124,14 +125,14 @@ const persistAssetsWithConcurrency = async (
 };
 
 // Persists staged payloads before the song transaction and returns records without binary fields.
-export const prepareLocalSongsCoverAssets = async (songs: LocalSong[]): Promise<LocalSong[]> => {
+export const prepareLocalSongsCoverAssets = async (songs: LocalSong[], coverPayloads?: ReadonlyMap<string, Blob>): Promise<LocalSong[]> => {
   const assetIds = Array.from(new Set(songs.flatMap(song => (
     isValidLocalCoverAssetId(song.localCoverAssetId) ? [song.localCoverAssetId] : []
   ))));
   const records = await appDatabase.local_cover_assets.bulkGet(assetIds);
   const available = new Set<string>();
 
-  await persistAssetsWithConcurrency(assetIds, records, available);
+  await persistAssetsWithConcurrency(assetIds, records, available, coverPayloads);
 
   return songs.map(song => {
     if (!song.localCoverAssetId) return song;

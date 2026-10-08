@@ -2929,6 +2929,7 @@ export default {
     "windowResizeFailed": "无法将主播放器窗口调整到导出分辨率。",
     "recordingCancelled": "录制已取消。",
     "recorderUnknownError": "录制器发生未知错误。",
+    "writeBufferExceeded": "磁盘写入速度无法跟上录制，已停止导出以限制内存占用。",
   },
   "player": {
     "play": "播放",

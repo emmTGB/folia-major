@@ -205,9 +205,9 @@ export const saveLocalSong = async (song: LocalSong): Promise<void> => {
   await assignImportedSongs([song]);
 };
 
-export const saveLocalSongs = async (songs: LocalSong[]): Promise<void> => {
+export const saveLocalSongs = async (songs: LocalSong[], coverPayloads?: ReadonlyMap<string, Blob>): Promise<void> => {
   await ensureLocalLibraryInitialized();
-  await assignImportedSongs(songs);
+  await assignImportedSongs(songs, { coverPayloads });
 };
 
 export const getLocalSong = async (id: string): Promise<LocalSong | undefined> => {

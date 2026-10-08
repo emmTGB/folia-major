@@ -262,4 +262,28 @@ describe('localCoverAssetService', () => {
         expect(removeLocalCoverBinary).toHaveBeenCalledWith(assetId);
         expect((await appDatabase.local_cover_assets.get(assetId))?.blob).toBeInstanceOf(Blob);
     });
+    it('persists batch-owned payloads without putting binary fields into song records', async () => {
+        const assetId = 'sha256:' + 'd'.repeat(64);
+        const cover = new Blob(['scoped-cover'], { type: 'image/png' });
+        await assignImportedSongs([buildSong('scoped-one', assetId), buildSong('scoped-two', assetId)], {
+            coverPayloads: new Map([[assetId, cover]]),
+        });
+        expect(writeLocalCoverBinary).toHaveBeenCalledTimes(1);
+        expect(writeLocalCoverBinary).toHaveBeenCalledWith(assetId, cover);
+        const records = await appDatabase.local_music.toArray();
+        expect(records.every(song => !('embeddedCover' in song) && !song.localCoverNeedsAssetMigration)).toBe(true);
+    });
+
+    it('does not retain batch-owned payloads for a later save after binary persistence fails', async () => {
+        const assetId = 'sha256:' + 'e'.repeat(64);
+        const cover = new Blob(['scoped-failure'], { type: 'image/png' });
+        vi.mocked(writeLocalCoverBinary).mockRejectedValueOnce(new Error('disk full'));
+        await assignImportedSongs([buildSong('failed-scoped', assetId)], {
+            coverPayloads: new Map([[assetId, cover]]),
+        });
+        await assignImportedSongs([buildSong('later-scoped', assetId)]);
+        expect(writeLocalCoverBinary).toHaveBeenCalledTimes(1);
+        expect(await appDatabase.local_music.get('later-scoped')).toMatchObject({ localCoverNeedsAssetMigration: true });
+    });
+
 });
