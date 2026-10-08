@@ -5,6 +5,7 @@ import { parseEmbeddedMetadataAsync, type EmbeddedMetadataResult } from '../util
 import { autoMatchBestLyric } from '../utils/lyrics/autoMatchBestLyric';
 import { normalizeLyricMatchText } from '../utils/lyrics/matchScore';
 import { createSafeObjectUrl } from '../utils/blobGuards';
+import { repairFlacMetadata } from '../utils/flacMetadataRepair';
 import { resolveExplicitFileTimedLyricFormat, type ExplicitFileTimedLyricFormat } from '../utils/lyrics/formatDetection';
 import { applyMatchedMetadata } from './localLibraryCatalogService';
 import { buildLyricSearchQuery } from '../utils/lyrics/searchQuery';
@@ -27,12 +28,13 @@ import { createFoliaIgnoreMatcher, isIgnoredByFoliaMatchers, type FoliaIgnoreMat
 import { getLocalLibraryAvailability } from './localLibraryAvailability';
 import { useLyricSettingsStore } from '../stores/useLyricSettingsStore';
 import { getLocalLyricFilePriority, isSameLocalLyricFormatOrder, normalizeLocalLyricFormatOrder, type LocalLyricFileFormat } from '../utils/lyrics/localLyricFormatOrder';
+import { readLyricFile } from '../utils/lyrics/lyricFileDecoding';
 import { isLocalFolderIgnored, normalizeLocalFolderPath, runLocalFolderMutation, setLocalFolderIgnored } from './localLibraryFolderIgnore';
 
 
 type EmbeddedMetadata = EmbeddedMetadataResult;
 
-export const EMBEDDED_METADATA_VERSION = 5;
+export const EMBEDDED_METADATA_VERSION = 7;
 
 interface ImportPreparationMetrics {
     getFileMs: number;
@@ -248,9 +250,10 @@ export function extractMetadataFromFilename(fileName: string): { title?: string;
 
 // Get audio duration from file
 async function getAudioDuration(file: File): Promise<number> {
+    const playbackInput = await repairFlacMetadata(file, true);
     return new Promise((resolve) => {
         const audio = new Audio();
-        const url = createSafeObjectUrl(file);
+        const url = createSafeObjectUrl(playbackInput);
         if (!url) {
             resolve(0);
             return;
@@ -822,7 +825,7 @@ async function buildImportedSong(
     } else if (lrcMap.has(baseName)) {
         try {
             const lyricCandidate = lrcMap.get(baseName)!;
-            localLyricsContent = await lyricCandidate.file.text();
+            localLyricsContent = await readLyricFile(lyricCandidate.file);
             localLyricsFormat = lyricCandidate.format;
         } catch (e) {
             console.error(`[LocalMusic] Failed to read local lyric for ${file.name}`, e);
@@ -833,7 +836,7 @@ async function buildImportedSong(
         localTranslationLyricsContent = existingSong?.localTranslationLyricsContent;
     } else if (tlrcMap.has(baseName)) {
         try {
-            localTranslationLyricsContent = await tlrcMap.get(baseName)!.text();
+            localTranslationLyricsContent = await readLyricFile(tlrcMap.get(baseName)!);
         } catch (e) {
             console.error(`[LocalMusic] Failed to read local translation lyric for ${file.name}`, e);
         }
@@ -1598,7 +1601,7 @@ export async function getAudioFromLocalSong(song: LocalSong): Promise<string | n
     if (fileHandle) {
         try {
             const file = await fileHandle.getFile();
-            return createSafeObjectUrl(file);
+            return await getAudioFromFile(file);
         } catch (error) {
             console.error('[LocalMusic] Failed to get file from handle:', error);
             // File may have been moved or the stored handle may have become stale.
@@ -1610,7 +1613,7 @@ export async function getAudioFromLocalSong(song: LocalSong): Promise<string | n
     if (recoveredHandle) {
         try {
             const file = await recoveredHandle.getFile();
-            return createSafeObjectUrl(file);
+            return await getAudioFromFile(file);
         } catch (error) {
             console.error('[LocalMusic] Failed to get file from recovered directory handle:', error);
             fileHandleMap.delete(song.id);
@@ -1728,7 +1731,7 @@ export async function ensureLocalSongCoverAsset(song: LocalSong): Promise<LocalS
 
 // Get audio blob from File object (for file input imports)
 export async function getAudioFromFile(file: File): Promise<string> {
-    const url = createSafeObjectUrl(file);
+    const url = createSafeObjectUrl(await repairFlacMetadata(file, true));
     if (!url) throw new TypeError('Local audio source must be a File or Blob');
     return url;
 }

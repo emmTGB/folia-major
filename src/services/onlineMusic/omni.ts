@@ -18,6 +18,7 @@ import type {
     OnlineMusicProvider,
     PersonalFmRequestOptions,
     ProviderCatalogEntityKind,
+    LoginSelfCheckResult,
     QrLoginMethod,
     QrLoginState,
 } from '../../types/onlineMusic';
@@ -29,9 +30,11 @@ import { saveSongReplayGain } from './resourceCache';
 import {
     getOnlineMusicProvider,
     getOnlineMusicProviderForSong,
+    getOnlineMusicProviderRegistryVersion,
     listOnlineMusicProviders,
     providerSupports,
     requireOnlineMusicProvider,
+    subscribeOnlineMusicProviderRegistry,
 } from './providerRegistry';
 import { saveProviderAccountSnapshot } from './providerAccountCache';
 import { applyOmniAudioHook, applyOmniLyricsHook } from '../hostExtensionHooks';
@@ -42,7 +45,11 @@ import { applyOmniAudioHook, applyOmniLyricsHook } from '../hostExtensionHooks';
 
 type PageInput = { limit: number; offset: number };
 
-const activeProviderId = (): OmniProviderId => useOnlineProviderAccountStore.getState().activeProviderId;
+const activeProviderId = (): OmniProviderId => {
+    const storedProviderId = useOnlineProviderAccountStore.getState().activeProviderId;
+    // A persisted selection can outlive its provider when switching builds or branches.
+    return getOnlineMusicProvider(storedProviderId) ? storedProviderId : 'netease';
+};
 
 const activeProvider = () => requireOnlineMusicProvider(activeProviderId());
 
@@ -110,6 +117,16 @@ export const omni = {
     getActiveRequestGeneration(): number {
         return activeRequestGeneration;
     },
+
+    // The provider list changes at runtime (Folium mods). A useSyncExternalStore pair for the UI.
+    subscribeProviders(listener: () => void): () => void {
+        return subscribeOnlineMusicProviderRegistry(listener);
+    },
+
+    getProviderRegistryVersion(): number {
+        return getOnlineMusicProviderRegistryVersion();
+    },
+
     getProviderSummaries(): OmniProviderSummary[] {
         const accounts = useOnlineProviderAccountStore.getState().accounts;
         return listOnlineMusicProviders().map(provider => {
@@ -119,6 +136,7 @@ export const omni = {
                 displayName: provider.displayName,
                 shortName: provider.shortName || provider.displayName,
                 availability: provider.getAvailability?.() ?? { configured: true },
+                requiresAccount: provider.capabilities.auth,
                 status: account?.status || 'unknown',
                 user: account?.user || null,
                 collections: account?.collections || [],
@@ -165,6 +183,10 @@ export const omni = {
 
     getProviderCapabilities(providerId: OmniProviderId): OmniProviderCapabilities {
         return requireOnlineMusicProvider(providerId).capabilities;
+    },
+
+    supportsDailySongs(providerId: OmniProviderId): boolean {
+        return typeof requireOnlineMusicProvider(providerId).recommendations?.getDailySongs === 'function';
     },
 
     getProviderAvailability(providerId: OmniProviderId) {
@@ -238,6 +260,16 @@ export const omni = {
         } catch (error) {
             return [`provider diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}`];
         }
+    },
+
+    // 扫码失败后的主动自检：没有这个能力的 provider（kugou、bodian、mod 源）回 false / null。
+    // 自检本身出错时照常抛出，由登录会话记进时间线与报告。
+    canRunQrLoginSelfCheck(providerId: OmniProviderId): boolean {
+        return Boolean(requireOnlineMusicProvider(providerId).auth?.canRunQrLoginSelfCheck?.());
+    },
+
+    async runQrLoginSelfCheck(providerId: OmniProviderId): Promise<LoginSelfCheckResult | null> {
+        return await requireOnlineMusicProvider(providerId).auth?.runQrLoginSelfCheck?.() ?? null;
     },
 
     // 只有明确声明了二维码寿命的 provider 才由前端计时；其余照旧只认后端报出的过期状态。
@@ -446,7 +478,7 @@ export const omni = {
     },
 
     canPlaySong(song: SongResult): boolean {
-        return Boolean(providerForSong(song).playback);
+        return Boolean(getOnlineMusicProviderForSong(song)?.playback);
     },
 
     async getAudioSource(song: SongResult, quality: AudioQualityPreference): Promise<OmniAudioSource | null> {
@@ -582,6 +614,25 @@ export const omni = {
         await this.updateCollectionTracks(playlist, 'add', [song]);
         try {
             await this.refreshProviderPlaylists(playlist.providerId);
+            // Netease owns its liked state in useNeteaseLibrary; avoid its cached /likelist here.
+            if (playlist.isLiked === true && playlist.providerId !== 'netease' && providerSupports(provider, 'likes')) {
+                const account = useOnlineProviderAccountStore.getState().accounts[playlist.providerId];
+                if (account?.user?.id !== undefined && account?.user?.id !== null) {
+                    const userId = account.user.id;
+                    // A full liked list may be large. Do not delay success or overwrite a newer account/mutation.
+                    void this.getProviderLikedSongIds(playlist.providerId, userId).then(async likedSongIds => {
+                        const latest = useOnlineProviderAccountStore.getState().accounts[playlist.providerId];
+                        if (latest?.user?.id !== userId || latest.likedSongIds !== account.likedSongIds) return;
+                        useOnlineProviderAccountStore.getState().updateAccount(playlist.providerId, { likedSongIds });
+                        await persistProviderLikedSongIds(playlist.providerId);
+                    }).catch(error => {
+                        console.warn('[Omni] Failed to refresh liked songs after playlist mutation', {
+                            providerId: playlist.providerId,
+                            name: error instanceof Error ? error.name : 'Error',
+                        });
+                    });
+                }
+            }
         } catch (error) {
             console.warn('[Omni] Failed to refresh provider playlists after mutation', {
                 providerId: playlist.providerId,

@@ -17,7 +17,14 @@ UI / hooks / stores / app services
   -> src/types/onlineMusic.ts（共享合同）
 ```
 
-当前 registry 注册 `netease`、`kugou` 和 `qq`。Navidrome 是独立的 Subsonic 服务，入口是 `src/services/navidromeService.ts`，不属于 Omni provider。
+当前 registry 注册 `netease`、`kugou`、`qq` 和桌面端的 `bodian`。波点接入状态、接口与剩余验收见
+[`docs/bodian.md`](../../../docs/bodian.md)；支持喜欢与自建歌单歌曲增删，收藏写入尚未实现。Navidrome 是独立的 Subsonic 服务，入口是 `src/services/navidromeService.ts`，不属于 Omni provider。
+
+扫码登录的分工：provider（`neteaseProvider.ts`、`qqProvider.ts`）把后端的响应翻译成 `QrLoginState`，失败时带上后端原文（`message`）、原始返回字段（`detail`，QQ 的失败阶段与原因、上游状态码、退避时长、上一次失败都原样保留）、结构化原因（`reason`：手机上取消、连接被重置）、冷却（`retryAfterMs`）以及「网络层瞬时失败」（`transient`，没拿到上游回应、二维码仍有效）；要码与生成二维码拿不到 key / 图片时直接抛错，不再交出空值。provider 不持有任何扫码的模块级状态：一轮扫码的步骤、代次、时间线都在 Library Core 的 `core/services/providerLoginSession.ts`。会话在登录失败后自动调用 `omni.runQrLoginSelfCheck` 跑一次主动自检（在手机上取消除外），结论由 `core/model/loginSelfCheckRules.ts` 推出、显示在登录界面上，并和时间线、`omni.getQrLoginDiagnostics` 的 provider 段一起进诊断报告。
+
+provider 段的内容来自主进程的内嵌后端快照（`loginBackendDiagnostics.ts` 排版，`electron/loginBackendIpc.cjs` 的 `get-login-diagnostics`）：应用与系统环境、凭据加密后端、后端状态、每一轮拉起的步骤（耗时、结果、错误原文）、上游连接记录（`electron/networkRecorder.cjs`：连了哪个地址、v4 还是 v6、TCP / TLS 耗时、断在哪一步、Node 错误码），网易另有每次登录请求的记录与扫码身份，QQ 另有包内扫码服务的原始失败（`electron/qqBackend.cjs` 挂在 `failSession` / `failBootstrap` 上的钩子）与 `qq-auth.*` 事件。报告不做隐私脱敏（IP、错误原文都保留），登录界面如实告知报告收集了哪些数据；登录凭据（cookie、token、session）的值从不进入记录。网页版没有主进程，provider 段只有会话状态，自检只检查远端 API 能不能连上（`loginSelfCheck.ts`）。
+
+网易扫码轮询（`/login/qr/check`）在桌面端由主进程替换的 `login_qr_check` 处理（`electron/neteaseApiStartup.cjs` 的 `createLoginQrCheck`）：上游原版请求失败时只回 `404 Not Found`，替换后渲染进程拿到真实的 `{ code, msg }`，例如 `code 502: read ECONNRESET`。扫码的要码与轮询在主进程遇到网络层失败时立即重发一次（`withQrNetworkRetry`）；渲染进程的会话对轮询的瞬时失败再容忍两次。识别连接被重置与网络层失败用 `shared/networkErrorText`（`.mjs` 给渲染进程，`.cjs` 给主进程，内容一致）。主进程在扫码请求被重置后，于下一次要码前换掉扫码身份（`electron/neteaseLoginIdentity.cjs`）：`deviceId` 每次都换；匿名 token `MUSIC_A` 只在 token 文件比加载时更新时才换得到。网易与 QQ 两个内嵌后端的拉起、状态与诊断分别在 `electron/neteaseBackend.cjs` 与 `electron/qqBackend.cjs`，`electron/main.cjs` 只负责装配。
 
 ## Public contract
 
@@ -29,7 +36,7 @@ UI / hooks / stores / app services
 | 账号/二维码 | `getLoginStatus`、`logout`、`createQrLogin`、`checkQrLogin` | provider auth adapter；不要在 UI 直接保留 raw session |
 | 搜索 | `searchSongs`、`searchProviderSongs` | 普通搜索按 active provider；显式 provider 或跨 provider 用第二个方法 |
 | 用户库 | `getUserPlaylists`、`getProviderUserPlaylists`、`getUserAlbums`、`getLikedSongIds`、`getCloudCollection` | 统一 `OmniCollection` / page 类型，账号快照可先展示再静默刷新 |
-| 推荐 | `getHomeFeed`、`getPersonalFm`、`getDailySongs`、`getRecommendationHistory*`、`dislikeSong` | 首页推荐与历史推荐仍由 Omni 路由 |
+| 推荐 | `getHomeFeed`、`getPersonalFm`、`supportsDailySongs`、`getDailySongs`、`getRecommendationHistory*`、`dislikeSong` | 首页推荐与历史推荐仍由 Omni 路由；日推入口按能力显示，空结果不隐藏入口 |
 | 播放/歌词 | `getSongDetail`、`canPlaySong`、`getAudioSource`、`getLyrics`、`getChorusRanges` | 输出 `OmniAudioSource` / `OmniLyricsResult`；Navidrome 歌词走独立 service |
 | 听歌上报 | `canReportPlayback`、`reportPlayback` | 只有声明 `playbackReports` 的 provider 支持（当前仅网易云）；时长必须是真实累计播放秒数，频控在 `playbackReportGate.ts` |
 | 可用性 | `getSongAvailability`、`getSongReplacement` | 保留 unsupported / unavailable / auth 等 `OmniError` 语义 |
@@ -42,6 +49,9 @@ UI / hooks / stores / app services
 ## Provider and cache files
 
 - `providerRegistry.ts`：注册、查找、按歌曲 `sourceRef` 选择 provider、能力检查。
+- `bodianProvider.ts`：波点 adapter；`bodianTransport.ts` 通过受限 IPC 连接 `electron/bodianApiBridge.cjs`。
+  桥接调用固定版本的 `bodian-music-api`，协议实现在独立仓库维护；Folia 负责加密存储与媒体策略。
+  `bodianCatalog.ts` / `bodianLibrary.ts` 处理集合与用户库，`bodianNormalize.ts` 统一数据，凭据不返回 renderer。
 - `neteaseProvider.ts`：网易云 adapter，归一化到 Omni contract。
 - `kugouProvider.ts`：酷狗 adapter；请求细节在 `kugouTransport.ts`，具体接口需结合 `docs/ku-go-api-docs.md` 和 `skills/kugou-provider-alignment`。
 - `qqProvider.ts`：QQ 音乐 adapter；请求与 opaque session 细节在 `qqTransport.ts`，归一化在 `qqNormalize.ts`。集合身份一律用 mid，数字 `albumid` / `singer.id` 会被上游拒收（返回 HTTP 200 但 `code` 非 0，只表现成空白页）。后端由 `VITE_QQ_API_BASE` 指向的私有 QQ API 提供，未配置时该 provider 不可用；填相对路径（`/api/qq`）时走的是本仓库内置的 serverless 入口（`worker/qq.ts` / `api-ts/qq.ts`）。扫码通道由后端 `/login/channels` 声明；打开登录时 UI 会等待能力发现并使用同一份结果决定流程，只宣告一个通道时直接进入单步流程。旧后端没有这条路由时回落到硬编码的 `qq` / `wechat` 两条，暂时性探测失败允许后续重试。
